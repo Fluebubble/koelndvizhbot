@@ -1,7 +1,7 @@
 const { Telegraf } = require('telegraf');
 const cron = require('node-cron');
 const http = require('http');
-const mongoose = require('mongoose'); // Подключаем базу данных
+const mongoose = require('mongoose');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const MONGO_URI = process.env.MONGO_URI;
@@ -11,13 +11,17 @@ if (!BOT_TOKEN || !MONGO_URI) {
     process.exit(1);
 }
 
-// === ПОДКЛЮЧЕНИЕ К СЕТИ MONGODB ===
+// === ПОДКЛЮЧЕНИЕ К MONGODB И АВТОПОСЕВ ===
 mongoose.connect(MONGO_URI)
-    .then(() => console.log('Успешно подключились к облачной базе MongoDB Atlas!'))
+    .then(async () => {
+        console.log('Успешно подключились к облачной базе MongoDB Atlas!');
+        await seedDatabase(); // Запуск проверки и заполнения текстов
+    })
     .catch(err => console.error('Критическая ошибка подключения к БД:', err));
 
-// === СХЕМЫ ДАННЫХ ДЛЯ ХРАНЕНИЯ ===
-// Схема для чатов (хранит ID группы, массив участников и ID утреннего посты)
+// === СХЕМЫ ДАННЫХ ===
+
+// Старые схемы (Динамические данные чата)
 const ChatSchema = new mongoose.Schema({
     chatId: { type: Number, required: true, unique: true },
     users: { type: [Number], default: [] },
@@ -25,16 +29,22 @@ const ChatSchema = new mongoose.Schema({
 });
 const Chat = mongoose.model('Chat', ChatSchema);
 
-// Схема для пользователей (хранит реальные имена людей по их ID)
 const UserSchema = new mongoose.Schema({
     userId: { type: Number, required: true, unique: true },
     firstName: { type: String, default: 'Тайный участник' }
 });
 const User = mongoose.model('User', UserSchema);
 
+// Новые схемы (Для статичных текстов)
+const QuestionSchema = new mongoose.Schema({ text: { type: String, required: true } });
+const Question = mongoose.model('Question', QuestionSchema);
 
-// === БАЗА ДАННЫХ ДЛЯ ТЕКСТОВ ===
-const STUPID_QUESTIONS = [
+const GreetingSchema = new mongoose.Schema({ text: { type: String, required: true } });
+const Greeting = mongoose.model('Greeting', GreetingSchema);
+
+
+// === ИСХОДНЫЕ ДАННЫЕ ДЛЯ ПЕРВОГО ЗАПУСКА ===
+const DEFAULT_QUESTIONS = [
     "Если помидор — это фрукт, то является ли кетчуп вареньем?",
     "Почему круглые пиццы упаковывают в квадратные коробки и едят треугольниками?",
     "Если бы ты был супом, то каким и почему?",
@@ -48,7 +58,7 @@ const STUPID_QUESTIONS = [
     "Можно ли выпить за здоровье человека безалкогольное пиво, или это аннулирует пожелание?"
 ];
 
-const MORNING_GREETINGS = [
+const DEFAULT_GREETINGS = [
     "Доброе утро, петушары. Кто не ответит мне тем же, тот сегодня останется без комбикорма и без курочек.",
     "Доброе утро, петушары. Кто не ответит, тот весь день будет кукарекать в пустой курятник.",
     "Доброе утро, петушары. Не поздороваетесь в ответ — пойдёте на шашлык первыми.",
@@ -69,6 +79,25 @@ const REPLY_OPTIONS = [
     "А ты хорош."
 ];
 
+// Функция, которая наполняет пустую базу данных текстами при первом запуске
+async function seedDatabase() {
+    try {
+        const qCount = await Question.countDocuments();
+        if (qCount === 0) {
+            await Question.insertMany(DEFAULT_QUESTIONS.map(t => ({ text: t })));
+            console.log('🌱 База данных вопросов успешно инициализирована!');
+        }
+
+        const gCount = await Greeting.countDocuments();
+        if (gCount === 0) {
+            await Greeting.insertMany(DEFAULT_GREETINGS.map(t => ({ text: t })));
+            console.log('🌱 База данных приветствий успешно инициализирована!');
+        }
+    } catch (err) {
+        console.error('Ошибка при инициализации текстов в БД:', err);
+    }
+}
+
 const bot = new Telegraf(BOT_TOKEN);
 
 // === ЛОГИКА ОБРАБОТКИ СООБЩЕНИЙ ===
@@ -79,21 +108,18 @@ bot.on('message', async (ctx, next) => {
 
     if ((chat.type === 'group' || chat.type === 'supergroup') && !from.is_bot) {
         try {
-            // 1. Сохраняем/обновляем имя пользователя в глобальной базе
             await User.findOneAndUpdate(
                 { userId: from.id },
                 { firstName: from.first_name || 'Тайный участник' },
                 { upsert: true }
             );
 
-            // 2. Добавляем ID пользователя в список участников конкретного чата
             await Chat.findOneAndUpdate(
                 { chatId: chat.id },
                 { $addToSet: { users: from.id } },
                 { upsert: true }
             );
 
-            // 3. Проверка на реплай к утреннему приветствию
             if (message.reply_to_message) {
                 const dbChat = await Chat.findOne({ chatId: chat.id });
                 if (dbChat && dbChat.morningMessageId === message.reply_to_message.message_id) {
@@ -102,7 +128,7 @@ bot.on('message', async (ctx, next) => {
                 }
             }
         } catch (error) {
-            console.error('Ошибка работы с базой данных в обработчике:', error);
+            console.error('Ошибка в обработчике сообщений:', error);
         }
     }
     return next();
@@ -112,19 +138,23 @@ bot.on('message', async (ctx, next) => {
 async function sendMorningGreeting() {
     try {
         const chats = await Chat.find({});
+        if (chats.length === 0) return;
+
         for (const chat of chats) {
-            const randomGreeting = MORNING_GREETINGS[Math.floor(Math.random() * MORNING_GREETINGS.length)];
+            // Берем 1 случайный документ из коллекции приветствий средствами MongoDB
+            const randomDoc = await Greeting.aggregate([{ $sample: { size: 1 } }]);
+            const greetingText = randomDoc[0] ? randomDoc[0].text : "Доброе утро, петушары!";
+
             try {
-                const sentMsg = await bot.telegram.sendMessage(chat.chatId, randomGreeting);
-                // Фиксируем ID сообщения в БД
+                const sentMsg = await bot.telegram.sendMessage(chat.chatId, greetingText);
                 chat.morningMessageId = sentMsg.message_id;
                 await chat.save();
             } catch (error) {
-                console.error(`Не удалось отправить утреннее приветствие в чат ${chat.chatId}:`, error);
+                console.error(`Не удалось отправить приветствие в чат ${chat.chatId}:`, error);
             }
         }
     } catch (dbError) {
-        console.error('Ошибка получения чатов для утреннего приветствия:', dbError);
+        console.error('Ошибка получения приветствий из БД:', dbError);
     }
 }
 
@@ -146,9 +176,12 @@ async function sendDailyQuestion(specificChatId = null) {
             const dbUser = await User.findOne({ userId: randomUserId });
             const firstName = dbUser ? dbUser.firstName : 'Тайный участник';
 
-            const randomQuestion = STUPID_QUESTIONS[Math.floor(Math.random() * STUPID_QUESTIONS.length)];
+            // Берем 1 случайный документ из коллекции вопросов средствами MongoDB
+            const randomDoc = await Question.aggregate([{ $sample: { size: 1 } }]);
+            const questionText = randomDoc[0] ? randomDoc[0].text : "Где вопросы?";
+
             const mention = `<a href="tg://user?id=${randomUserId}">${firstName}</a>`;
-            const text = `🚨 <b>Внимание, опрос!</b> 🚨\n\n${mention}, отвечай не думая:\n<i>${randomQuestion}</i>`;
+            const text = `🚨 <b>Внимание, опрос!</b> 🚨\n\n${mention}, отвечай не думая:\n<i>${questionText}</i>`;
 
             try {
                 await bot.telegram.sendMessage(chat.chatId, text, { parse_mode: 'HTML' });
@@ -157,7 +190,7 @@ async function sendDailyQuestion(specificChatId = null) {
             }
         }
     } catch (dbError) {
-        console.error('Ошибка получения данных из БД для дневного вопроса:', dbError);
+        console.error('Ошибка получения вопросов из БД:', dbError);
     }
 }
 
@@ -170,23 +203,16 @@ bot.command('question', async (ctx) => {
     }
 });
 
-// КРОН 1: Утреннее приветствие (7:00 утра по Германии)
+// КРОН ПЛАНИРОВЩИКИ
 cron.schedule('0 7 * * *', () => {
     console.log('Запуск утреннего кукареканья...');
     sendMorningGreeting();
-}, {
-    scheduled: true,
-    timezone: "Europe/Berlin" 
-});
+}, { scheduled: true, timezone: "Europe/Berlin" });
 
-// КРОН 2: Дневной опрос (12:00 по Москве)
 cron.schedule('0 12 * * *', () => {
     console.log('Запуск дневного опроса...');
     sendDailyQuestion();
-}, {
-    scheduled: true,
-    timezone: "Europe/Moscow" 
-});
+}, { scheduled: true, timezone: "Europe/Moscow" });
 
 // Серверная заглушка для Render
 const PORT = process.env.PORT || 3000;
@@ -196,7 +222,7 @@ http.createServer((req, res) => {
 }).listen(PORT);
 
 bot.launch().then(() => {
-    console.log('Бот успешно перезапущен с поддержкой постоянной базы данных MongoDB!');
+    console.log('Бот запущен. Тексты перенесены в полноценную базу данных.');
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));

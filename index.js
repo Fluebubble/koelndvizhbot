@@ -182,10 +182,10 @@ bot.command('question', async (ctx) => {
 });
 
 // Слушаем текстовые сообщения для сбора базы юзеров и ответов на "привет"
+// Слушаем текстовые сообщения для сбора базы юзеров и ответов
 bot.on('text', async (ctx) => {
     const { id: userId, username, first_name: firstName, last_name: lastName } = ctx.from;
     const chatId = ctx.chat.id;
-    const messageText = ctx.message.text.toLowerCase();
 
     try {
         // 1. Сохраняем/обновляем пользователя в глобальной базе
@@ -207,20 +207,35 @@ bot.on('text', async (ctx) => {
             );
         }
 
-        // 3. Логика ответов бота на приветствия участников
-        const greetingWords = ['привет', 'хай', 'здарова', 'ку', 'доброе утро', 'дорова', 'салам', 'шалом'];
-        const isGreeting = greetingWords.some(word => messageText.includes(word));
+        // 3. Логика ответов бота (СТРОГО НА ЛЮБОЙ РЕПЛАЙ К УТРЕННЕМУ ПРИВЕТСТВИЮ)
+        const replyToMessage = ctx.message.reply_to_message;
 
-        if (isGreeting) {
-            // Ищем случайный ответ в коллекции responses
-            const randomResponse = await Response.aggregate([{ $sample: { size: 1 } }]);
+        // Проверяем: это ответ на сообщение НАШЕГО бота?
+        const isReplyToBot = replyToMessage && replyToMessage.from && replyToMessage.from.id === ctx.botInfo.id;
+
+        if (isReplyToBot) {
+            const originalBotText = replyToMessage.text; // Текст сообщения бота, на которое ответили
+
+            // Ищем в базе, является ли исходный текст утренним приветствием
+            const isActualMorningGreeting = await Greeting.findOne({ text: originalBotText });
             
-            if (randomResponse[0]) {
-                // Если в тексте из базы заготовлено место под имя (например, "{name}, привет!"), меняем его на имя юзера
-                let replyText = randomResponse[0].text;
-                replyText = replyText.replace('{name}', firstName);
+            // Учитываем дефолтный текст приветствия
+            const isDefaultGreeting = originalBotText === "Доброе утро, чат! 👋";
+
+            // Если человек ответил (чем угодно!) именно на утреннее приветствие
+            if (isActualMorningGreeting || isDefaultGreeting) {
+                // Ищем случайный ответ в коллекции responses
+                const randomResponse = await Response.aggregate([{ $sample: { size: 1 } }]);
                 
-                await ctx.reply(replyText);
+                if (randomResponse[0]) {
+                    let replyText = randomResponse[0].text;
+                    replyText = replyText.replace('{name}', firstName);
+                    
+                    // Отвечаем реплаем на сообщение человека
+                    await ctx.reply(replyText, { reply_to_message_id: ctx.message.message_id });
+                }
+            } else {
+                console.log('Пользователь что-то ответил боту, но исходное сообщение не было утренним приветствием. Игнорируем.');
             }
         }
 

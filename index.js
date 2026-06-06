@@ -229,7 +229,36 @@ bot.on('text', async (ctx) => {
     }
 });
 
+// Секретная команда проверки утреннего приветствия (только для админов)
+bot.hears(/^петух проснись$/i, async (ctx) => {
+    const chatId = ctx.chat.id;
+    const userId = ctx.from.id;
 
+    // В личке у бота админов нет, там команда сработает сразу
+    if (ctx.chat.type === 'private') {
+        await ctx.reply('☀️ Симуляция утра в личке:');
+        await sendMorningGreeting(chatId);
+        return;
+    }
+
+    try {
+        // Проверяем статус пользователя в этом чате
+        const member = await ctx.telegram.getChatMember(chatId, userId);
+        const isAdmin = member.status === 'administrator' || member.status === 'creator';
+
+        if (isAdmin) {
+            console.log(`👤 Админ ${ctx.from.firstName} запустил секретную команду проверки утра.`);
+            await sendMorningGreeting(chatId);
+        } else {
+            // Если пишет не админ — бот просто проигнорирует или можно втихаря ответить подколкой из базы
+            const randomDoc = await Question.aggregate([{ $sample: { size: 1 } }]);
+            const insult = randomDoc[0] ? randomDoc[0].text : "...";
+            await ctx.reply(`Слышь, <a href="tg://user?id=${userId}">${ctx.from.firstName}</a>${insult} Чтобы петухов будить, сначала админку заслужи.`, { parse_mode: 'HTML' });
+        }
+    } catch (error) {
+        console.error('Ошибка проверки прав для секретной команды:', error);
+    }
+});
 // ==========================================
 // 5. ПЛАНИРОВЩИК ЗАДАЧ (CRON)
 // ==========================================

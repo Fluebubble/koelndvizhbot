@@ -230,7 +230,7 @@ bot.on('text', async (ctx) => {
 });
 
 // Секретная команда проверки утреннего приветствия (только для админов)
-bot.hears(/^wakeupmotherfucker$/i, async (ctx) => {
+command('petuhPodjem', async (ctx) => {
     const chatId = ctx.chat.id;
     const userId = ctx.from.id;
 

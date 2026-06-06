@@ -244,7 +244,7 @@ bot.command('petuhPodjem', async (ctx) => {
     try {
         // Жесткая проверка: если это ТЫ (поставь свой ник без @), пускаем без лишних проверок API
         // Замени 'твой_ник_в_телеграм' на свой реальный username (например, 'Fluebubble')
-        if (ctx.from.username && ctx.from.username.toLowerCase() === 'твой_ник_в_телеграм'.toLowerCase()) {
+        if (ctx.from.username && ctx.from.username.toLowerCase() === '@anatoliy_trots'.toLowerCase()) {
             console.log(`👑 Создатель группы напрямую запустил команду.`);
             await sendMorningGreeting(chatId);
             return;

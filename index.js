@@ -242,7 +242,15 @@ bot.command('petuhPodjem', async (ctx) => {
     }
 
     try {
-        // Проверяем статус пользователя в этом чате
+        // Жесткая проверка: если это ТЫ (поставь свой ник без @), пускаем без лишних проверок API
+        // Замени 'твой_ник_в_телеграм' на свой реальный username (например, 'Fluebubble')
+        if (ctx.from.username && ctx.from.username.toLowerCase() === 'твой_ник_в_телеграм'.toLowerCase()) {
+            console.log(`👑 Создатель группы напрямую запустил команду.`);
+            await sendMorningGreeting(chatId);
+            return;
+        }
+
+        // Стандартная проверка для остальных админов
         const member = await ctx.telegram.getChatMember(chatId, userId);
         const isAdmin = member.status === 'administrator' || member.status === 'creator';
 
@@ -250,13 +258,14 @@ bot.command('petuhPodjem', async (ctx) => {
             console.log(`👤 Админ ${ctx.from.firstName} запустил секретную команду проверки утра.`);
             await sendMorningGreeting(chatId);
         } else {
-            // Если пишет не админ — бот просто проигнорирует или можно втихаря ответить подколкой из базы
             const randomDoc = await Question.aggregate([{ $sample: { size: 1 } }]);
             const insult = randomDoc[0] ? randomDoc[0].text : "...";
             await ctx.reply(`Слышь, <a href="tg://user?id=${userId}">${ctx.from.firstName}</a>${insult} Чтобы петухов будить, сначала админку заслужи.`, { parse_mode: 'HTML' });
         }
     } catch (error) {
-        console.error('Ошибка проверки прав для секретной команды:', error);
+        console.error('❌ Ошибка проверки прав для секретной команды:', error);
+        // Если произошла ошибка API, бот хотя бы сообщит об этом в чат, а не промолчит
+        await ctx.reply('⚠️ Не удалось проверить права админа. Убедись, что бот является администратором группы!');
     }
 });
 // ==========================================

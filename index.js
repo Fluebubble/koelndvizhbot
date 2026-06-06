@@ -1,19 +1,39 @@
 const { Telegraf } = require('telegraf');
 const cron = require('node-cron');
 const http = require('http');
+const mongoose = require('mongoose'); // Подключаем базу данных
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-if (!BOT_TOKEN) {
-    console.error("Ошибка: Переменная окружения BOT_TOKEN не задана!");
+const MONGO_URI = process.env.MONGO_URI;
+
+if (!BOT_TOKEN || !MONGO_URI) {
+    console.error("Ошибка: Проверьте переменные окружения BOT_TOKEN и MONGO_URI!");
     process.exit(1);
 }
 
-const bot = new Telegraf(BOT_TOKEN);
-const chatsData = {};
-const userNames = {};
-const morningMessages = {}; // Здесь храним ID утренних сообщений для каждого чата
+// === ПОДКЛЮЧЕНИЕ К СЕТИ MONGODB ===
+mongoose.connect(MONGO_URI)
+    .then(() => console.log('Успешно подключились к облачной базе MongoDB Atlas!'))
+    .catch(err => console.error('Критическая ошибка подключения к БД:', err));
 
-// База глупых дневных вопросов
+// === СХЕМЫ ДАННЫХ ДЛЯ ХРАНЕНИЯ ===
+// Схема для чатов (хранит ID группы, массив участников и ID утреннего посты)
+const ChatSchema = new mongoose.Schema({
+    chatId: { type: Number, required: true, unique: true },
+    users: { type: [Number], default: [] },
+    morningMessageId: { type: Number, default: null }
+});
+const Chat = mongoose.model('Chat', ChatSchema);
+
+// Схема для пользователей (хранит реальные имена людей по их ID)
+const UserSchema = new mongoose.Schema({
+    userId: { type: Number, required: true, unique: true },
+    firstName: { type: String, default: 'Тайный участник' }
+});
+const User = mongoose.model('User', UserSchema);
+
+
+// === БАЗА ДАННЫХ ДЛЯ ТЕКСТОВ ===
 const STUPID_QUESTIONS = [
     "Если помидор — это фрукт, то является ли кетчуп вареньем?",
     "Почему круглые пиццы упаковывают в квадратные коробки и едят треугольниками?",
@@ -28,7 +48,6 @@ const STUPID_QUESTIONS = [
     "Можно ли выпить за здоровье человека безалкогольное пиво, или это аннулирует пожелание?"
 ];
 
-// Твои утренние приветствия
 const MORNING_GREETINGS = [
     "Доброе утро, петушары. Кто не ответит мне тем же, тот сегодня останется без комбикорма и без курочек.",
     "Доброе утро, петушары. Кто не ответит, тот весь день будет кукарекать в пустой курятник.",
@@ -42,7 +61,6 @@ const MORNING_GREETINGS = [
     "Доброе утро, петушары. Кто не поддержит, тот сегодня спит в гнезде для наседок."
 ];
 
-// Ответы на реакцию пользователей
 const REPLY_OPTIONS = [
     "Хуета",
     "Засчитано",
@@ -51,77 +69,99 @@ const REPLY_OPTIONS = [
     "А ты хорош."
 ];
 
-// Слушатель всех сообщений в чате
+const bot = new Telegraf(BOT_TOKEN);
+
+// === ЛОГИКА ОБРАБОТКИ СООБЩЕНИЙ ===
 bot.on('message', async (ctx, next) => {
     const chat = ctx.chat;
     const from = ctx.from;
     const message = ctx.message;
 
     if ((chat.type === 'group' || chat.type === 'supergroup') && !from.is_bot) {
-        // 1. Собираем базу активных участников
-        if (!chatsData[chat.id]) {
-            chatsData[chat.id] = new Set();
-        }
-        chatsData[chat.id].add(from.id);
-        userNames[from.id] = from.first_name || 'Тайный участник';
+        try {
+            // 1. Сохраняем/обновляем имя пользователя в глобальной базе
+            await User.findOneAndUpdate(
+                { userId: from.id },
+                { firstName: from.first_name || 'Тайный участник' },
+                { upsert: true }
+            );
 
-        // 2. ПРОВЕРКА: это ответ на утреннее приветствие бота?
-        if (message.reply_to_message) {
-            const targetMorningId = morningMessages[chat.id];
-            
-            // Если ID сообщения, на которое ответили, совпадает с утренним ID в этом чате
-            if (targetMorningId && message.reply_to_message.message_id === targetMorningId) {
-                const randomReply = REPLY_OPTIONS[Math.floor(Math.random() * REPLY_OPTIONS.length)];
-                try {
-                    // Отвечаем именно на сообщение пользователя
+            // 2. Добавляем ID пользователя в список участников конкретного чата
+            await Chat.findOneAndUpdate(
+                { chatId: chat.id },
+                { $addToSet: { users: from.id } },
+                { upsert: true }
+            );
+
+            // 3. Проверка на реплай к утреннему приветствию
+            if (message.reply_to_message) {
+                const dbChat = await Chat.findOne({ chatId: chat.id });
+                if (dbChat && dbChat.morningMessageId === message.reply_to_message.message_id) {
+                    const randomReply = REPLY_OPTIONS[Math.floor(Math.random() * REPLY_OPTIONS.length)];
                     await ctx.reply(randomReply, { reply_to_message_id: message.message_id });
-                } catch (error) {
-                    console.error('Ошибка при отправке утреннего ответа:', error);
                 }
             }
+        } catch (error) {
+            console.error('Ошибка работы с базой данных в обработчике:', error);
         }
     }
     return next();
 });
 
-// Функция для рассылки утреннего кукареканья
+// === РАССЫЛКА УТРЕННИХ ПРИВЕТСТВИЙ ===
 async function sendMorningGreeting() {
-    for (const chatId in chatsData) {
-        const randomGreeting = MORNING_GREETINGS[Math.floor(Math.random() * MORNING_GREETINGS.length)];
-        try {
-            const sentMsg = await bot.telegram.sendMessage(chatId, randomGreeting);
-            // Запоминаем ID этого сообщения для конкретного чата
-            morningMessages[chatId] = sentMsg.message_id;
-        } catch (error) {
-            console.error(`Не удалось отправить утреннее приветствие в чат ${chatId}:`, error);
+    try {
+        const chats = await Chat.find({});
+        for (const chat of chats) {
+            const randomGreeting = MORNING_GREETINGS[Math.floor(Math.random() * MORNING_GREETINGS.length)];
+            try {
+                const sentMsg = await bot.telegram.sendMessage(chat.chatId, randomGreeting);
+                // Фиксируем ID сообщения в БД
+                chat.morningMessageId = sentMsg.message_id;
+                await chat.save();
+            } catch (error) {
+                console.error(`Не удалось отправить утреннее приветствие в чат ${chat.chatId}:`, error);
+            }
         }
+    } catch (dbError) {
+        console.error('Ошибка получения чатов для утреннего приветствия:', dbError);
     }
 }
 
-// Функция для дневного опроса
+// === РАССЫЛКА ДНЕВНЫХ ВОПРОСОВ ===
 async function sendDailyQuestion(specificChatId = null) {
-    const chatsToIterate = specificChatId ? [specificChatId] : Object.keys(chatsData);
+    try {
+        const query = specificChatId ? { chatId: specificChatId } : {};
+        const chats = await Chat.find(query);
 
-    for (const chatId of chatsToIterate) {
-        const usersArray = Array.from(chatsData[chatId] || []);
-        if (usersArray.length === 0) continue;
+        for (const chat of chats) {
+            if (!chat.users || chat.users.length === 0) {
+                if (specificChatId) {
+                    await bot.telegram.sendMessage(chat.chatId, "Я еще никого не запомнил в этом чате! Напишите что-нибудь.");
+                }
+                continue;
+            }
 
-        const randomUserId = usersArray[Math.floor(Math.random() * usersArray.length)];
-        const randomQuestion = STUPID_QUESTIONS[Math.floor(Math.random() * STUPID_QUESTIONS.length)];
-        const firstName = userNames[randomUserId];
+            const randomUserId = chat.users[Math.floor(Math.random() * chat.users.length)];
+            const dbUser = await User.findOne({ userId: randomUserId });
+            const firstName = dbUser ? dbUser.firstName : 'Тайный участник';
 
-        const mention = `<a href="tg://user?id=${randomUserId}">${firstName}</a>`;
-        const text = `🚨 <b>Внимание, опрос!</b> 🚨\n\n${mention}, отвечай не думая:\n<i>${randomQuestion}</i>`;
+            const randomQuestion = STUPID_QUESTIONS[Math.floor(Math.random() * STUPID_QUESTIONS.length)];
+            const mention = `<a href="tg://user?id=${randomUserId}">${firstName}</a>`;
+            const text = `🚨 <b>Внимание, опрос!</b> 🚨\n\n${mention}, отвечай не думая:\n<i>${randomQuestion}</i>`;
 
-        try {
-            await bot.telegram.sendMessage(chatId, text, { parse_mode: 'HTML' });
-        } catch (error) {
-            console.error(`Не удалось отправить дневной вопрос в чат ${chatId}:`, error);
+            try {
+                await bot.telegram.sendMessage(chat.chatId, text, { parse_mode: 'HTML' });
+            } catch (error) {
+                console.error(`Не удалось отправить дневной вопрос в чат ${chat.chatId}:`, error);
+            }
         }
+    } catch (dbError) {
+        console.error('Ошибка получения данных из БД для дневного вопроса:', dbError);
     }
 }
 
-// Ручной вызов дневного опроса
+// Команда /question
 bot.command('question', async (ctx) => {
     if (ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') {
         await sendDailyQuestion(ctx.chat.id);
@@ -130,9 +170,9 @@ bot.command('question', async (ctx) => {
     }
 });
 
-// КРОН 1: Утреннее приветствие (7:00 утра по времени Германии)
+// КРОН 1: Утреннее приветствие (7:00 утра по Германии)
 cron.schedule('0 7 * * *', () => {
-    console.log('Запуск утреннего приветствия по Берлину...');
+    console.log('Запуск утреннего кукареканья...');
     sendMorningGreeting();
 }, {
     scheduled: true,
@@ -141,7 +181,7 @@ cron.schedule('0 7 * * *', () => {
 
 // КРОН 2: Дневной опрос (12:00 по Москве)
 cron.schedule('0 12 * * *', () => {
-    console.log('Запуск дневного опроса по Москве...');
+    console.log('Запуск дневного опроса...');
     sendDailyQuestion();
 }, {
     scheduled: true,
@@ -156,7 +196,7 @@ http.createServer((req, res) => {
 }).listen(PORT);
 
 bot.launch().then(() => {
-    console.log('Бот успешно запущен со всеми обновлениями!');
+    console.log('Бот успешно перезапущен с поддержкой постоянной базы данных MongoDB!');
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));

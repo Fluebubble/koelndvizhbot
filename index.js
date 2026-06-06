@@ -281,6 +281,20 @@ cron.schedule('0 15 * * *', () => {
     timezone: "Europe/Berlin"
 });
 
+// ==========================================
+// 6. ЗАГЛУШКА ДЛЯ RENDER (ЧТОБЫ СЕРВЕР НЕ ПАДАЛ)
+// ==========================================
+const http = require('http');
+const PORT = process.env.PORT || 3000;
+
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot is running...');
+});
+
+server.listen(PORT, () => {
+    console.log(`📡 Микро-сервер для Render запущен на порту ${PORT}`);
+});
 
 // Запуск бота
 bot.launch().then(() => {

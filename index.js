@@ -88,9 +88,18 @@ async function verifyDatabase() {
 // ==========================================
 
 // Функция отправки утреннего приветствия
-async function sendMorningGreeting() {
+// Функция отправки утреннего приветствия (с поддержкой секретной команды)
+async function sendMorningGreeting(specificChatId = null) {
     try {
-        const chats = await Chat.find({});
+        let chats = [];
+        
+        // Если передан конкретный ID, отправляем только туда. Если нет — берем все чаты из базы (для Крона)
+        if (specificChatId) {
+            chats.push({ chatId: specificChatId });
+        } else {
+            chats = await Chat.find({});
+        }
+
         if (chats.length === 0) return;
 
         // Берем 1 случайное приветствие напрямую из базы

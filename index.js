@@ -27,7 +27,9 @@ const User = mongoose.model('User', userSchema);
 // Схема для чатов (групп)
 const chatSchema = new mongoose.Schema({
     chatId: { type: Number, unique: true, required: true },
-    users: [Number] // Массив ID пользователей, которые активничали в этом чате
+    users: [Number], // Массив ID пользователей, которые активничали в этом чате
+    lastMessageAt: { type: Date, default: Date.now }, // Время последнего сообщения в чате
+    questionSentToday: { type: Boolean, default: false } // Отправляли ли уже вопрос сегодня
 });
 const Chat = mongoose.model('Chat', chatSchema);
 
@@ -87,7 +89,6 @@ async function verifyDatabase() {
 // 3. ФУНКЦИИ РАССЫЛКИ (ЛОГИКА ИЗ БД)
 // ==========================================
 
-// Функция отправки утреннего приветствия
 // Функция отправки утреннего приветствия (с поддержкой секретной команды)
 async function sendMorningGreeting(specificChatId = null) {
     try {
@@ -118,7 +119,7 @@ async function sendMorningGreeting(specificChatId = null) {
     }
 }
 
-// Функция отправки дневного вопроса (по крону или по команде /question)
+// Функция отправки дневного вопроса (по крону, при тишине или по команде /question)
 async function sendDailyQuestion(specificChatId = null) {
     try {
         let chats = [];
@@ -126,7 +127,7 @@ async function sendDailyQuestion(specificChatId = null) {
         if (specificChatId) {
             let chat = await Chat.findOne({ chatId: specificChatId });
             if (!chat) {
-                chat = await Chat.create({ chatId: specificChatId, users: [] });
+                chat = await Chat.create({ chatId: specificChatId, users: [], lastMessageAt: new Date() });
             }
             chats.push(chat);
         } else {
@@ -159,6 +160,9 @@ async function sendDailyQuestion(specificChatId = null) {
 
             try {
                 await bot.telegram.sendMessage(chat.chatId, text, { parse_mode: 'HTML' });
+                
+                // Переключаем флаг, что в этот чат вопрос сегодня УЖЕ ушел
+                await Chat.updateOne({ chatId: chat.chatId }, { $set: { questionSentToday: true } });
             } catch (error) {
                 console.error(`Не удалось отправить вопрос в чат ${chat.chatId}:`, error);
             }
@@ -175,6 +179,8 @@ async function sendDailyQuestion(specificChatId = null) {
 // ==========================================
 // 4. ТРИГГЕРЫ И КОМАНДЫ БОТА
 // ==========================================
+
+// Секретная команда проверки утреннего приветствия (только для админов и создателя)
 bot.command('petuhPodjem', async (ctx) => {
     const chatId = ctx.chat.id;
     const userId = ctx.from.id;
@@ -187,8 +193,7 @@ bot.command('petuhPodjem', async (ctx) => {
     }
 
     try {
-        // Жесткая проверка: если это ТЫ (поставь свой ник без @), пускаем без лишних проверок API
-        // Замени 'твой_ник_в_телеграм' на свой реальный username (например, 'Fluebubble')
+        // Жесткая проверка: если это ТЫ, пускаем без лишних проверок API
         if (ctx.from.username && ctx.from.username.toLowerCase() === 'anatoliy_trots'.toLowerCase()) {
             console.log(`👑 Создатель группы напрямую запустил команду.`);
             await sendMorningGreeting(chatId);
@@ -209,17 +214,16 @@ bot.command('petuhPodjem', async (ctx) => {
         }
     } catch (error) {
         console.error('❌ Ошибка проверки прав для секретной команды:', error);
-        // Если произошла ошибка API, бот хотя бы сообщит об этом в чат, а не промолчит
         await ctx.reply('⚠️ Не удалось проверить права админа. Убедись, что бот является администратором группы!');
     }
 });
+
 // Ручной вызов вопроса
 bot.command('question', async (ctx) => {
     await sendDailyQuestion(ctx.chat.id);
 });
 
-// Слушаем текстовые сообщения для сбора базы юзеров и ответов на "привет"
-// Слушаем текстовые сообщения для сбора базы юзеров и ответов
+// Слушаем текстовые сообщения для сбора базы юзеров, обновления таймеров и ответов на реплаи
 bot.on('text', async (ctx) => {
     const { id: userId, username, first_name: firstName, last_name: lastName } = ctx.from;
     const chatId = ctx.chat.id;
@@ -232,13 +236,14 @@ bot.on('text', async (ctx) => {
             { upsert: true, new: true }
         );
 
-        // 2. Если сообщение из группы, привязываем пользователя к этому конкретному чату
+        // 2. Если сообщение из группы, привязываем пользователя и обновляем время активности
         if (ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') {
             await Chat.findOneAndUpdate(
                 { chatId },
                 { 
                     $setOnInsert: { chatId },
-                    $addToSet: { users: userId } 
+                    $addToSet: { users: userId },
+                    $set: { lastMessageAt: new Date() } // Фиксируем время сообщения для трекера тишины
                 },
                 { upsert: true }
             );
@@ -281,7 +286,6 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// Секретная команда проверки утреннего приветствия (только для админов)
 
 // ==========================================
 // 5. ПЛАНИРОВЩИК ЗАДАЧ (CRON)
@@ -296,14 +300,62 @@ cron.schedule('0 9 * * *', () => {
     timezone: "Europe/Berlin"
 });
 
-// Дневной опрос: каждый день в 15:00 по Берлину (Европе)
+// Дневной опрос по расписанию: каждый день в 15:00 по Берлину (Европе)
 cron.schedule('0 15 * * *', () => {
-    console.log('⏰ Сработал Крон: отправка дневного вопроса...');
+    console.log('⏰ Сработал Крон: отправка планового дневного вопроса...');
     sendDailyQuestion();
 }, {
     scheduled: true,
     timezone: "Europe/Berlin"
 });
+
+// Проверка на часовую тишину в группах: запускается каждые 10 минут
+cron.schedule('*/10 * * * *', async () => {
+    console.log('⏰ Крон: Проверка чатов на часовую тишину...');
+    try {
+        // Получаем текущий час в часовом поясе Берлина
+        const berlinTime = new Date().toLocaleString("en-US", { timeZone: "Europe/Berlin" });
+        const currentHour = new Date(berlinTime).getHours();
+
+        // Ограничение: если сейчас ночь (после 22:00 или до 07:00 утра), бот спит и не спамит
+        if (currentHour >= 22 || currentHour < 7) {
+            console.log(`🌙 Сейчас ночное время (${currentHour}:00 по Берлину). Проверка тишины пропущена.`);
+            return;
+        }
+
+        const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000); // Время ровно 1 час назад
+
+        // Ищем чаты, где никто не писал больше часа и вопрос сегодня еще не отправлялся
+        const silentChats = await Chat.find({
+            lastMessageAt: { $lt: oneHourAgo },
+            questionSentToday: false
+        });
+
+        for (const chat of silentChats) {
+            console.log(`🤫 Чат ${chat.chatId} молчит больше часа. Реанимируем...`);
+            await sendDailyQuestion(chat.chatId);
+        }
+    } catch (error) {
+        console.error('Ошибка при проверке тишины в чатах:', error);
+    }
+}, {
+    scheduled: true,
+    timezone: "Europe/Berlin"
+});
+
+// Сброс флагов отправки вопросов: каждый день в 00:01 ночи по Берлину
+cron.schedule('1 0 * * *', async () => {
+    console.log('⏰ Крон: Наступил новый день. Сбрасываем флаги дневных вопросов...');
+    try {
+        await Chat.updateMany({}, { $set: { questionSentToday: false } });
+    } catch (error) {
+        console.error('Ошибка сброса флагов у чатов:', error);
+    }
+}, {
+    scheduled: true,
+    timezone: "Europe/Berlin"
+});
+
 
 // ==========================================
 // 6. ЗАГЛУШКА ДЛЯ RENDER (ЧТОБЫ СЕРВЕР НЕ ПАДАЛ)

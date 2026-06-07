@@ -193,7 +193,7 @@ bot.command('petuhPodjem', async (ctx) => {
     }
 
     try {
-        // Жесткая проверка: если это ТЫ, пускаем без лишних проверок API
+        // Жесткая проверка: создатель группы
         if (ctx.from.username && ctx.from.username.toLowerCase() === 'anatoliy_trots'.toLowerCase()) {
             console.log(`👑 Создатель группы напрямую запустил команду.`);
             await sendMorningGreeting(chatId);
@@ -372,9 +372,24 @@ server.listen(PORT, () => {
     console.log(`📡 Микро-сервер для Render запущен на порту ${PORT}`);
 });
 
-// Запуск бота
-bot.launch().then(() => {
-    console.log('🤖 Бот успешно запущен и слушает команды!');
+// Безопасный запуск бота с перехватом ошибок инициализации
+bot.launch()
+    .then(() => {
+        console.log('🤖 Бот успешно запущен и слушает команды!');
+    })
+    .catch((error) => {
+        console.error('❌ Критическая ошибка при запуске бота:', error);
+        // Если это временный конфликт сессий при деплое — не ломаем процесс node
+        if (error.code === 409 || (error.description && error.description.includes('Conflict'))) {
+            console.log('⏳ Обнаружен конфликт сессий. Ожидаем, пока Render завершит старый инстанс...');
+        } else {
+            process.exit(1);
+        }
+    });
+
+// Глобальный перехватчик ошибок Telegraf в процессе работы (защита от краша при кривых сообщениях)
+bot.catch((err, ctx) => {
+    console.error(`❌ Ошибка Telegraf в процессе обработки апдейта ${ctx.update.update_id}:`, err);
 });
 
 // Плавная остановка при выключении сервера

@@ -119,7 +119,7 @@ async function sendMorningGreeting(specificChatId = null) {
     }
 }
 
-// Функция отправки дневного вопроса (по крону, при тишине или по команде /question)
+// Функция отправки дневного вопроса (с поддержкой нескольких случайных имён)
 async function sendDailyQuestion(specificChatId = null) {
     try {
         let chats = [];
@@ -146,20 +146,56 @@ async function sendDailyQuestion(specificChatId = null) {
                 continue;
             }
 
-            // Берем случайного юзера из тех, кто писал в этот чат
-            const randomUserId = chat.users[Math.floor(Math.random() * chat.users.length)];
-            const dbUser = await User.findOne({ userId: randomUserId });
-            const firstName = dbUser ? dbUser.firstName : 'Участник';
-
-            // Достаем случайный вопрос напрямую из базы
+            // 1. Достаем случайный вопрос напрямую из базы
             const randomDoc = await Question.aggregate([{ $sample: { size: 1 } }]);
-            const questionText = randomDoc[0] ? randomDoc[0].text : "у меня кончились каверзные вопросы...";
+            let questionText = randomDoc[0] ? randomDoc[0].text : "у меня кончились каверзные вопросы...";
 
-            const mention = `<a href="tg://user?id=${randomUserId}">${firstName}</a>`;
-            const text = `${mention}${questionText}`;
+            // 2. Перемешиваем массив пользователей чата (Алгоритм Фишера-Йетса)
+            const shuffledUsers = [...chat.users];
+            for (let i = shuffledUsers.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [shuffledUsers[i], shuffledUsers[j]] = [shuffledUsers[j], shuffledUsers[i]];
+            }
+
+            // 3. Функция для создания кликабельного упоминания по userId
+            const getMentionHtml = async (userId) => {
+                const dbUser = await User.findOne({ userId });
+                const name = dbUser ? dbUser.firstName : 'Участник';
+                return `<a href="tg://user?id=${userId}">${name}</a>`;
+            };
+
+            // 4. Ищем и заменяем {name1}, {name2}, {name3} в тексте вопроса
+            // Если в вопросе просто {name} (старый формат), он тоже заменится на первого юзера
+            if (questionText.includes('{name1}') || questionText.includes('{name2}')) {
+                if (shuffledUsers[0]) {
+                    const mention1 = await getMentionHtml(shuffledUsers[0]);
+                    questionText = questionText.replace(/{name1}/g, mention1);
+                }
+                if (shuffledUsers[1]) {
+                    const mention2 = await getMentionHtml(shuffledUsers[1]);
+                    questionText = questionText.replace(/{name2}/g, mention2);
+                } else {
+                    // Страховка: если в чате активен всего 1 человек, а вопросу нужно двое
+                    const mentionBackup = await getMentionHtml(shuffledUsers[0]);
+                    questionText = questionText.replace(/{name2}/g, `${mentionBackup} (и больше некому)`);
+                }
+            } else {
+                // Старая логика: если в вопросе нет цифр, а есть просто {name}
+                if (shuffledUsers[0]) {
+                    const mention = await getMentionHtml(shuffledUsers[0]);
+                    // Если в шаблоне базы вопрос идет БЕЗ {name} в начале (как было раньше), 
+                    // проверяем, нужно ли принудительно прикреплять имя в начало строки
+                    if (questionText.includes('{name}')) {
+                        questionText = questionText.replace(/{name}/g, mention);
+                    } else {
+                        questionText = `${mention}${questionText}`;
+                    }
+                }
+            }
 
             try {
-                await bot.telegram.sendMessage(chat.chatId, text, { parse_mode: 'HTML' });
+                // Отправляем уже полностью сформированный текст с подставленными именами
+                await bot.telegram.sendMessage(chat.chatId, questionText, { parse_mode: 'HTML' });
                 
                 // Переключаем флаг, что в этот чат вопрос сегодня УЖЕ ушел
                 await Chat.updateOne({ chatId: chat.chatId }, { $set: { questionSentToday: true } });
@@ -174,7 +210,6 @@ async function sendDailyQuestion(specificChatId = null) {
         }
     }
 }
-
 
 // ==========================================
 // 4. ТРИГГЕРЫ И КОМАНДЫ БОТА

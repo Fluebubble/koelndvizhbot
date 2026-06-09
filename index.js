@@ -165,28 +165,26 @@ async function sendDailyQuestion(specificChatId = null) {
             };
 
             // 4. Ищем и заменяем {name1}, {name2}, {name3} в тексте вопроса
-            // Если в вопросе просто {name} (старый формат), он тоже заменится на первого юзера
+            // Используем replaceAll, чтобы точно заменить все вхождения без проблем с регулярками
             if (questionText.includes('{name1}') || questionText.includes('{name2}')) {
                 if (shuffledUsers[0]) {
                     const mention1 = await getMentionHtml(shuffledUsers[0]);
-                    questionText = questionText.replace(/{name1}/g, mention1);
+                    questionText = questionText.replaceAll('{name1}', mention1);
                 }
                 if (shuffledUsers[1]) {
                     const mention2 = await getMentionHtml(shuffledUsers[1]);
-                    questionText = questionText.replace(/{name2}/g, mention2);
+                    questionText = questionText.replaceAll('{name2}', mention2);
                 } else {
-                    // Страховка: если в чате активен всего 1 человек, а вопросу нужно двое
+                    // Страховка: если в чате активен всего 1 человек
                     const mentionBackup = await getMentionHtml(shuffledUsers[0]);
-                    questionText = questionText.replace(/{name2}/g, `${mentionBackup} (и больше некому)`);
+                    questionText = questionText.replaceAll('{name2}', `${mentionBackup} (и больше некому)`);
                 }
             } else {
                 // Старая логика: если в вопросе нет цифр, а есть просто {name}
                 if (shuffledUsers[0]) {
                     const mention = await getMentionHtml(shuffledUsers[0]);
-                    // Если в шаблоне базы вопрос идет БЕЗ {name} в начале (как было раньше), 
-                    // проверяем, нужно ли принудительно прикреплять имя в начало строки
                     if (questionText.includes('{name}')) {
-                        questionText = questionText.replace(/{name}/g, mention);
+                        questionText = questionText.replaceAll('{name}', mention);
                     } else {
                         questionText = `${mention}${questionText}`;
                     }
